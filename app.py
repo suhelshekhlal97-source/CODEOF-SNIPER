@@ -53,6 +53,7 @@ SYMBOL = asset_map[selected_asset]
 PERIOD = st.sidebar.select_slider("Data Lookback", options=["1mo", "3mo", "6mo", "1y"], value="3mo")
 CONFIDENCE = st.sidebar.slider("Min Confidence %", 50, 95, 65) / 100
 INTERVAL = "1h"
+STARTING_CAPITAL = 10000
 
 st.sidebar.markdown("---")
 st.sidebar.caption(f"Strategy: **XGBoost Trend + Session Filter**")
@@ -114,9 +115,8 @@ def run_simulation(df, threshold):
     live_prob_buy = all_probs[-1][1]
     live_prob_sell = all_probs[-1][0]
     
-    # 5. Run Backtest Loop to Generate History Table
+    # 5. Run Backtest Loop
     trades = []
-    balance = 0
     
     # Iterate through history (skip first 50 for stability)
     for i in range(50, len(df)-1):
@@ -152,13 +152,25 @@ def run_simulation(df, threshold):
                 "Date (UTC)": date.strftime('%Y-%m-%d %H:%M'),
                 "Session": session,
                 "Action": action,
-                "Price": f"{entry_price:.2f}",
-                "PnL": f"{pnl:.2f}"
+                "Price": float(entry_price),
+                "PnL": float(pnl)
             })
             
-    return live_prob_buy, live_prob_sell, pd.DataFrame(trades)
+    # Calculate Summary Stats
+    total_trades = len(trades)
+    if total_trades > 0:
+        wins = sum(1 for t in trades if t['PnL'] > 0)
+        win_rate = (wins / total_trades) * 100
+        total_pnl = sum(t['PnL'] for t in trades)
+        final_balance = STARTING_CAPITAL + total_pnl
+    else:
+        win_rate = 0
+        total_pnl = 0
+        final_balance = STARTING_CAPITAL
 
-prob_buy, prob_sell, trade_history = run_simulation(df, CONFIDENCE)
+    return live_prob_buy, live_prob_sell, pd.DataFrame(trades), final_balance, win_rate, total_trades
+
+prob_buy, prob_sell, trade_history, final_bal, win_rate, total_trades = run_simulation(df, CONFIDENCE)
 
 # ==========================================
 # 5. DASHBOARD UI
@@ -212,27 +224,31 @@ with c2:
     if st.button("🔄 REFRESH DATA"):
         st.rerun()
 
-# --- NEW SECTION: TRADE HISTORY ---
+# --- PERFORMANCE SECTION (NEW) ---
 st.markdown("---")
-st.subheader(f"📜 Recent Trade History ({PERIOD})")
+st.subheader(f"📈 Backtest Performance (Last {PERIOD})")
 
+# Summary Metrics Row
+m1, m2, m3, m4 = st.columns(4)
+m1.metric("Final Balance", f"${final_bal:,.2f}", f"{(final_bal-STARTING_CAPITAL)/STARTING_CAPITAL*100:.1f}% Return")
+m2.metric("Win Rate", f"{win_rate:.1f}%")
+m3.metric("Total Trades", total_trades)
+m4.metric("Starting Capital", f"${STARTING_CAPITAL:,.0f}")
+
+# Trade History Table
 if not trade_history.empty:
-    # Reverse order to show newest trades first
-    trade_history = trade_history.iloc[::-1]
-    
-    # Display as a clean interactive table
     st.dataframe(
-        trade_history, 
+        trade_history.sort_index(ascending=False), # Sort newest first
         use_container_width=True, 
         hide_index=True,
         column_config={
-            "PnL": st.column_config.TextColumn(
+            "PnL": st.column_config.NumberColumn(
                 "PnL ($)",
-                help="Profit/Loss per 1 Unit",
-                validate="^-?\d+(\.\d{1,2})?$" # Validates numbers
+                format="$%.2f",
             ),
-            "Action": st.column_config.TextColumn(
-                "Signal",
+            "Price": st.column_config.NumberColumn(
+                "Entry Price",
+                format="$%.2f",
             ),
         }
     )
