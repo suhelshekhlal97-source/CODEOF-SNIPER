@@ -165,8 +165,14 @@ st.plotly_chart(fig, use_container_width=True)
 c1, c2 = st.columns([2, 1])
 
 with c1:
-    st.info(f"**AI Logic:** Analyzing {len(df)} candles. XGBoost Confidence: **{prob_buy*100:.1f}% Bullish** vs **{prob_sell*100:.1f}% Bearish**.")
-    st.progress(prob_buy)
+    # FIX: Convert numpy values to standard python floats using float()
+    bullish_conf = float(prob_buy)
+    bearish_conf = float(prob_sell)
+
+    st.info(f"**AI Logic:** Analyzing {len(df)} candles. XGBoost Confidence: **{bullish_conf*100:.1f}% Bullish** vs **{bearish_conf*100:.1f}% Bearish**.")
+    
+    # FIX: Use the converted float value for the progress bar
+    st.progress(bullish_conf)
 
 with c2:
     if st.button("🔄 REFRESH DATA"):
