@@ -40,13 +40,25 @@ st.title("🎯 Sniper Bot | Live Execution Terminal")
 # ==========================================
 st.sidebar.header("⚙️ Configuration")
 
+# --- UPDATED ASSET LIST ---
 asset_map = {
+    # Crypto
     "Bitcoin (BTC-USD)": "BTC-USD",
     "Ethereum (ETH-USD)": "ETH-USD",
-    "Gold (GC=F)": "GC=F",
-    "Euro/USD (EURUSD=X)": "EURUSD=X",
-    "Nasdaq 100 (NQ=F)": "NQ=F"
+    
+    # Forex
+    "Gold (XAU/USD)": "GC=F",          # Gold Futures (Best for Volume)
+    "EUR/USD": "EURUSD=X",
+    "USD/JPY": "JPY=X",
+    "GBP/JPY": "GBPJPY=X",
+    
+    # Indices
+    "US30 (Dow Jones)": "^DJI",        # Dow Jones Industrial Average
+    "US500 (S&P 500)": "^GSPC",        # S&P 500 Index
+    "German Index (DAX)": "^GDAXI",    # DAX Performance Index
+    "Japan Index (Nikkei 225)": "^N225" # Nikkei 225
 }
+
 selected_asset = st.sidebar.selectbox("Select Asset", list(asset_map.keys()))
 SYMBOL = asset_map[selected_asset]
 
@@ -56,7 +68,7 @@ RR_RATIO_STR = st.sidebar.select_slider("Risk:Reward Target", options=["1:1", "1
 INTERVAL = "1h"
 STARTING_CAPITAL = 10000
 
-# Parse RR Ratio (e.g., "1:2" -> 2.0)
+# Parse RR Ratio
 TARGET_RR = float(RR_RATIO_STR.split(":")[1])
 
 st.sidebar.markdown("---")
@@ -94,7 +106,7 @@ with st.spinner(f"Connecting to Exchange for {SYMBOL}..."):
     df = fetch_market_data(SYMBOL, PERIOD, INTERVAL)
 
 if df.empty:
-    st.error("❌ Connection Failed. Market may be closed or ticker invalid.")
+    st.error(f"❌ Connection Failed. Market data for {SYMBOL} is unavailable (Market might be closed).")
     st.stop()
 
 # ==========================================
@@ -201,25 +213,19 @@ def run_simulation(df, threshold, target_rr):
     # Calculate Summary Stats
     total_trades = len(trades)
     win_rate = 0
-    total_pnl = 0
     final_balance = STARTING_CAPITAL
     
     if total_trades > 0:
         wins = sum(1 for t in trades if t['PnL'] > 0)
         win_rate = (wins / total_trades) * 100
-        # Normalize PnL to Account Size (Assuming 1 Unit for simplicity in display, 
-        # but for balance we assume 2% risk sizing)
         
         for t in trades:
-             # Dynamic Position Sizing: Risk 2% of current balance
              risk_amt = final_balance * 0.02
-             # PnL scaling
              if t['Result'] == "SL HIT":
                  final_balance -= risk_amt
              elif t['Result'] == "TP HIT":
                  final_balance += (risk_amt * target_rr)
              else:
-                 # Partial result
                  final_balance += (risk_amt * t['RR Achieved'])
                  
     return live_prob_buy, live_prob_sell, pd.DataFrame(trades), final_balance, win_rate, total_trades
@@ -276,7 +282,7 @@ with c2:
     if st.button("🔄 REFRESH DATA"):
         st.rerun()
 
-# --- PERFORMANCE SECTION (NEW) ---
+# --- PERFORMANCE SECTION ---
 st.markdown("---")
 st.subheader(f"📈 Backtest Performance (Last {PERIOD})")
 
@@ -292,9 +298,9 @@ if not trade_history.empty:
         use_container_width=True, 
         hide_index=True,
         column_config={
-            "Entry": st.column_config.NumberColumn("Entry", format="$%.2f"),
-            "SL": st.column_config.NumberColumn("Stop Loss", format="$%.2f"),
-            "TP": st.column_config.NumberColumn("Take Profit", format="$%.2f"),
+            "Entry": st.column_config.NumberColumn("Entry", format="%.2f"),
+            "SL": st.column_config.NumberColumn("Stop Loss", format="%.2f"),
+            "TP": st.column_config.NumberColumn("Take Profit", format="%.2f"),
             "RR Achieved": st.column_config.NumberColumn("Achieved RR", format="%.2f x"),
             "Result": st.column_config.TextColumn("Outcome"),
         }
