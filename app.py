@@ -52,8 +52,12 @@ SYMBOL = asset_map[selected_asset]
 
 PERIOD = st.sidebar.select_slider("Data Lookback", options=["1mo", "3mo", "6mo", "1y"], value="3mo")
 CONFIDENCE = st.sidebar.slider("Min Confidence %", 50, 95, 65) / 100
+RR_RATIO_STR = st.sidebar.select_slider("Risk:Reward Target", options=["1:1", "1:1.5", "1:2", "1:3"], value="1:2")
 INTERVAL = "1h"
 STARTING_CAPITAL = 10000
+
+# Parse RR Ratio (e.g., "1:2" -> 2.0)
+TARGET_RR = float(RR_RATIO_STR.split(":")[1])
 
 st.sidebar.markdown("---")
 st.sidebar.caption(f"Strategy: **XGBoost Trend + Session Filter**")
@@ -94,9 +98,9 @@ if df.empty:
     st.stop()
 
 # ==========================================
-# 4. AI & BACKTEST LOGIC
+# 4. AI & ADVANCED BACKTEST ENGINE
 # ==========================================
-def run_simulation(df, threshold):
+def run_simulation(df, threshold, target_rr):
     # 1. Prepare Data
     df['Target'] = (df['Close'].shift(-1) > df['Close']).astype(int)
     features = ['RSI', 'MACD', 'ATR']
@@ -108,74 +112,123 @@ def run_simulation(df, threshold):
     model = XGBClassifier(n_estimators=100, max_depth=3, learning_rate=0.05, eval_metric='logloss')
     model.fit(X, y)
     
-    # 3. Get Probabilities for ALL candles
-    all_probs = model.predict_proba(df[features]) # [[Prob_Down, Prob_Up], ...]
+    # 3. Get Probabilities
+    all_probs = model.predict_proba(df[features]) 
     
-    # 4. Live Signal (Last Candle)
+    # 4. Live Signal
     live_prob_buy = all_probs[-1][1]
     live_prob_sell = all_probs[-1][0]
     
-    # 5. Run Backtest Loop
+    # 5. Run Realistic Backtest (High/Low Check)
     trades = []
     
-    # Iterate through history (skip first 50 for stability)
     for i in range(50, len(df)-1):
-        date = df.index[i]
+        # Data for Decision
         session = df['Session'].iloc[i]
-        
-        # Skip Asian Session
-        if session == "ASIAN":
-            continue
+        if session == "ASIAN": continue # Skip Asian
             
         prob_buy = all_probs[i][1]
-        prob_down = all_probs[i][0]
+        prob_sell = all_probs[i][0]
+        atr = df['ATR'].iloc[i]
         
         action = "WAIT"
-        if prob_buy > threshold:
-            action = "BUY"
-        elif prob_down > threshold:
-            action = "SELL"
+        if prob_buy > threshold: action = "BUY"
+        elif prob_sell > threshold: action = "SELL"
             
         if action != "WAIT":
-            entry_price = df['Open'].iloc[i+1] # Enter next candle open
-            close_price = df['Close'].iloc[i+1] # Exit next candle close (Intraday)
-            atr = df['ATR'].iloc[i]
+            # Trade Parameters
+            entry_price = df['Open'].iloc[i+1]
+            risk_dist = atr * 1.0 # Stop Loss Distance
+            reward_dist = atr * target_rr # Take Profit Distance
             
-            # Simple PnL Logic (1 Hour Hold)
-            pnl = 0
+            sl_price = 0
+            tp_price = 0
+            
             if action == "BUY":
-                pnl = close_price - entry_price
+                sl_price = entry_price - risk_dist
+                tp_price = entry_price + reward_dist
+            else: # SELL
+                sl_price = entry_price + risk_dist
+                tp_price = entry_price - reward_dist
+            
+            # Check Outcome on NEXT Candle
+            next_high = df['High'].iloc[i+1]
+            next_low = df['Low'].iloc[i+1]
+            next_close = df['Close'].iloc[i+1]
+            
+            result = "EXIT"
+            pnl = 0
+            achieved_rr = 0.0
+            
+            # Logic: Did we hit TP or SL?
+            if action == "BUY":
+                if next_low <= sl_price:
+                    result = "SL HIT"
+                    pnl = -risk_dist
+                    achieved_rr = -1.0
+                elif next_high >= tp_price:
+                    result = "TP HIT"
+                    pnl = reward_dist
+                    achieved_rr = target_rr
+                else:
+                    pnl = next_close - entry_price
+                    achieved_rr = pnl / risk_dist
+            
             elif action == "SELL":
-                pnl = entry_price - close_price
-                
+                if next_high >= sl_price:
+                    result = "SL HIT"
+                    pnl = -risk_dist
+                    achieved_rr = -1.0
+                elif next_low <= tp_price:
+                    result = "TP HIT"
+                    pnl = reward_dist
+                    achieved_rr = target_rr
+                else:
+                    pnl = entry_price - next_close
+                    achieved_rr = pnl / risk_dist
+
             trades.append({
-                "Date (UTC)": date.strftime('%Y-%m-%d %H:%M'),
-                "Session": session,
-                "Action": action,
-                "Price": float(entry_price),
-                "PnL": float(pnl)
+                "Date": df.index[i].strftime('%Y-%m-%d %H:%M'),
+                "Type": action,
+                "Entry": entry_price,
+                "SL": sl_price,
+                "TP": tp_price,
+                "Result": result,
+                "RR Achieved": achieved_rr,
+                "PnL": pnl
             })
             
     # Calculate Summary Stats
     total_trades = len(trades)
+    win_rate = 0
+    total_pnl = 0
+    final_balance = STARTING_CAPITAL
+    
     if total_trades > 0:
         wins = sum(1 for t in trades if t['PnL'] > 0)
         win_rate = (wins / total_trades) * 100
-        total_pnl = sum(t['PnL'] for t in trades)
-        final_balance = STARTING_CAPITAL + total_pnl
-    else:
-        win_rate = 0
-        total_pnl = 0
-        final_balance = STARTING_CAPITAL
-
+        # Normalize PnL to Account Size (Assuming 1 Unit for simplicity in display, 
+        # but for balance we assume 2% risk sizing)
+        
+        for t in trades:
+             # Dynamic Position Sizing: Risk 2% of current balance
+             risk_amt = final_balance * 0.02
+             # PnL scaling
+             if t['Result'] == "SL HIT":
+                 final_balance -= risk_amt
+             elif t['Result'] == "TP HIT":
+                 final_balance += (risk_amt * target_rr)
+             else:
+                 # Partial result
+                 final_balance += (risk_amt * t['RR Achieved'])
+                 
     return live_prob_buy, live_prob_sell, pd.DataFrame(trades), final_balance, win_rate, total_trades
 
-prob_buy, prob_sell, trade_history, final_bal, win_rate, total_trades = run_simulation(df, CONFIDENCE)
+prob_buy, prob_sell, trade_history, final_bal, win_rate, total_trades = run_simulation(df, CONFIDENCE, TARGET_RR)
 
 # ==========================================
 # 5. DASHBOARD UI
 # ==========================================
-# Session Logic for Display
 current_hour = datetime.now(timezone.utc).hour
 current_session = "ASIAN (Sleep)"
 session_color = "off"
@@ -186,7 +239,6 @@ elif 13 <= current_hour <= 21:
     current_session = "NEW YORK (Active)"
     session_color = "normal"
 
-# Live Signal Logic
 signal = "WAIT"
 if prob_buy > CONFIDENCE:
     signal = "BUY"
@@ -202,7 +254,7 @@ atr = df['ATR'].iloc[-1]
 col1.metric("Live Price", f"${current_price:,.2f}", f"{change:.2f}")
 col2.metric("Current Session", current_session, delta_color=session_color)
 col3.metric("AI Signal", signal, f"{max(prob_buy, prob_sell)*100:.1f}% Conf")
-col4.metric("Stop Loss (1x ATR)", f"${current_price - atr:.2f}" if signal == "BUY" else f"${current_price + atr:.2f}")
+col4.metric("Risk (1 ATR)", f"${atr:.2f}")
 
 # --- CHART ---
 st.markdown("### 📊 Live Market Analysis")
@@ -228,28 +280,23 @@ with c2:
 st.markdown("---")
 st.subheader(f"📈 Backtest Performance (Last {PERIOD})")
 
-# Summary Metrics Row
 m1, m2, m3, m4 = st.columns(4)
 m1.metric("Final Balance", f"${final_bal:,.2f}", f"{(final_bal-STARTING_CAPITAL)/STARTING_CAPITAL*100:.1f}% Return")
 m2.metric("Win Rate", f"{win_rate:.1f}%")
 m3.metric("Total Trades", total_trades)
-m4.metric("Starting Capital", f"${STARTING_CAPITAL:,.0f}")
+m4.metric("Target RR", f"1:{TARGET_RR}")
 
-# Trade History Table
 if not trade_history.empty:
     st.dataframe(
-        trade_history.sort_index(ascending=False), # Sort newest first
+        trade_history.sort_index(ascending=False),
         use_container_width=True, 
         hide_index=True,
         column_config={
-            "PnL": st.column_config.NumberColumn(
-                "PnL ($)",
-                format="$%.2f",
-            ),
-            "Price": st.column_config.NumberColumn(
-                "Entry Price",
-                format="$%.2f",
-            ),
+            "Entry": st.column_config.NumberColumn("Entry", format="$%.2f"),
+            "SL": st.column_config.NumberColumn("Stop Loss", format="$%.2f"),
+            "TP": st.column_config.NumberColumn("Take Profit", format="$%.2f"),
+            "RR Achieved": st.column_config.NumberColumn("Achieved RR", format="%.2f x"),
+            "Result": st.column_config.TextColumn("Outcome"),
         }
     )
 else:
